@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pricewatch
+      POSTGRES_PASSWORD: pricewatch
+      POSTGRES_DB: pricewatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pricewatch_pg:/var/lib/postgresql/data
+  app:
+    build: .
+    depends_on:
+      - db
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgresql://pricewatch:pricewatch@db:5432/pricewatch
+      APP_PASSWORD: test
+      SESSION_SECRET: local-test-secret-change-me
+      PGSSL: "false"
+    ports:
+      - "8080:8080"
+volumes:
+  pricewatch_pg:
