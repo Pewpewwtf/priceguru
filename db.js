@@ -86,6 +86,21 @@ export async function initDb() {
           value JSONB NOT NULL,
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS ozon_agent_jobs (
+          id TEXT PRIMARY KEY,
+          url TEXT NOT NULL,
+          sku TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          name TEXT,
+          price NUMERIC(14,2),
+          source TEXT,
+          error TEXT,
+          agent_id TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          claimed_at TIMESTAMPTZ,
+          finished_at TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_ozon_agent_jobs_status ON ozon_agent_jobs(status, created_at);
       `);
       pool = candidate;
       dbStatus = 'postgres';
@@ -124,7 +139,7 @@ export async function getState() {
       latest_price: num(p.latest_price),
       competitors: mem.competitors.filter(c => c.product_id === p.id).map(c => ({...c, latest_price:num(c.latest_price), history: c.history || []}))
     }));
-    return { version: '9.5.2', products, events: mem.events.slice(0,100) };
+    return { version: '10.0', products, events: mem.events.slice(0,100) };
   }
   const db = await requirePool();
   const [pRes, cRes, hRes, eRes] = await Promise.all([
@@ -147,7 +162,7 @@ export async function getState() {
     byProduct.get(String(c.product_id)).push({...c, id:Number(c.id), product_id:Number(c.product_id), latest_price:num(c.latest_price), history:histories.get(`competitor:${c.id}`)||[]});
   }
   return {
-    version: '9.5.2',
+    version: '10.0',
     products: pRes.rows.map(p => ({...p, id:Number(p.id), latest_price:num(p.latest_price), history:histories.get(`product:${p.id}`)||[], competitors:byProduct.get(String(p.id))||[]})),
     events: eRes.rows
   };
@@ -229,6 +244,90 @@ export async function getAllItems(){
 
 export async function getSetting(key){if(!hasPg)return mem.settings.get(key)??null;const db=await requirePool();const r=await db.query('SELECT value FROM settings WHERE key=$1',[key]);return r.rows[0]?.value??null;}
 export async function setSetting(key,value){if(!hasPg){mem.settings.set(key,value);return;}const db=await requirePool();await db.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`,[key,value]);}
+
+
+// --- Ozon cloud browser worker queue -------------------------------------------------
+const memAgentJobs = new Map();
+
+export async function createOzonAgentJob(job) {
+  const row = {
+    id:String(job.id), url:String(job.url), sku:job.sku?String(job.sku):null,
+    status:'pending', name:null, price:null, source:null, error:null, agent_id:null,
+    created_at:new Date().toISOString(), claimed_at:null, finished_at:null
+  };
+  if(!hasPg){ memAgentJobs.set(row.id,row); return {...row}; }
+  const db=await requirePool();
+  const r=await db.query(`INSERT INTO ozon_agent_jobs(id,url,sku,status) VALUES($1,$2,$3,'pending') RETURNING *`,[row.id,row.url,row.sku]);
+  return normalizeAgentJob(r.rows[0]);
+}
+
+export async function getOzonAgentJob(id) {
+  if(!hasPg) return memAgentJobs.has(String(id)) ? {...memAgentJobs.get(String(id))} : null;
+  const db=await requirePool();
+  const r=await db.query('SELECT * FROM ozon_agent_jobs WHERE id=$1',[String(id)]);
+  return r.rows[0]?normalizeAgentJob(r.rows[0]):null;
+}
+
+export async function claimOzonAgentJob(agentId) {
+  agentId=String(agentId||'ozon-vps').slice(0,160);
+  if(!hasPg){
+    for(const row of [...memAgentJobs.values()].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at)))){
+      if(row.status==='pending'){
+        row.status='processing';row.agent_id=agentId;row.claimed_at=new Date().toISOString();return {...row};
+      }
+    }
+    return null;
+  }
+  const db=await requirePool();
+  const r=await db.query(`WITH picked AS (
+      SELECT id FROM ozon_agent_jobs
+      WHERE status='pending' AND created_at > NOW() - INTERVAL '15 minutes'
+      ORDER BY created_at ASC
+      FOR UPDATE SKIP LOCKED LIMIT 1
+    )
+    UPDATE ozon_agent_jobs j
+    SET status='processing',agent_id=$1,claimed_at=NOW()
+    FROM picked WHERE j.id=picked.id RETURNING j.*`,[agentId]);
+  return r.rows[0]?normalizeAgentJob(r.rows[0]):null;
+}
+
+export async function completeOzonAgentJob(id,result={}) {
+  const ok=!!result.ok;
+  if(!hasPg){
+    const row=memAgentJobs.get(String(id));if(!row)return null;
+    Object.assign(row,{status:ok?'done':'error',name:result.name||null,price:result.price==null?null:Number(result.price),source:result.source||null,error:ok?null:String(result.error||'Ozon Agent error'),finished_at:new Date().toISOString()});
+    return {...row};
+  }
+  const db=await requirePool();
+  const r=await db.query(`UPDATE ozon_agent_jobs SET status=$2,name=$3,price=$4,source=$5,error=$6,finished_at=NOW() WHERE id=$1 RETURNING *`,[
+    String(id),ok?'done':'error',result.name||null,result.price==null?null:Number(result.price),result.source||null,ok?null:String(result.error||'Ozon Agent error')
+  ]);
+  return r.rows[0]?normalizeAgentJob(r.rows[0]):null;
+}
+
+export async function touchOzonAgent(agentId,meta={}) {
+  const value={agent_id:String(agentId||'ozon-vps').slice(0,160),last_seen:new Date().toISOString(),...meta};
+  await setSetting('ozon_agent_status',value);
+  return value;
+}
+
+export async function getOzonAgentStatus() {
+  const value=await getSetting('ozon_agent_status').catch(()=>null);
+  if(!value||!value.last_seen) return {online:false,last_seen:null,agent_id:null};
+  const age=Date.now()-new Date(value.last_seen).getTime();
+  return {...value,online:Number.isFinite(age)&&age<15000};
+}
+
+export async function cleanupOzonAgentJobs() {
+  if(!hasPg){
+    const cutoff=Date.now()-24*3600*1000;for(const [id,row] of memAgentJobs){if(new Date(row.created_at).getTime()<cutoff)memAgentJobs.delete(id);}return;
+  }
+  const db=await requirePool();
+  await db.query(`DELETE FROM ozon_agent_jobs WHERE created_at < NOW() - INTERVAL '24 hours'`);
+  await db.query(`UPDATE ozon_agent_jobs SET status='pending',agent_id=NULL,claimed_at=NULL WHERE status='processing' AND claimed_at < NOW() - INTERVAL '5 minutes'`);
+}
+
+function normalizeAgentJob(r){return r?{...r,price:r.price==null?null:Number(r.price)}:null;}
 
 export async function resetAndImport(state){
   if(!state || !Array.isArray(state.products)) throw new Error('Invalid PriceWatch backup');

@@ -2,16 +2,16 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PriceWatch — WB + Ozon</title>
+<title>PriceGuru — WB + Ozon</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <div><div class="brand"><div class="logo">₽</div>PriceWatch <span class="v">v9.5.2 cloud</span></div><div class="small" style="margin-top:5px">WB + Ozon · PostgreSQL · <span class="online">● облако</span></div></div>
+    <div><div class="brand"><div class="logo">₽</div>PriceGuru <span class="v">v10.0 cloud</span></div><div class="small" style="margin-top:5px">WB + Ozon · PostgreSQL · <span class="online">● облако</span> · Ozon Browser: <span id="ozonAgentState" class="agent-off">● офлайн</span></div></div>
     <div class="actions"><button class="btn" onclick="openBulkProducts()">+ Товары списком</button><button class="btn" onclick="openImport()">Импорт v8</button><button class="btn" onclick="exportData()">Экспорт</button><button class="btn primary" id="refreshBtn" onclick="refreshAll()">↻ Обновить цены</button></div>
   </div>
-  <div class="info"><b>Массовое добавление:</b> вставь до 100 ссылок — по одной на строку. Название, маркетплейс, артикул и цена подтянутся автоматически.</div>
+  <div class="info"><b>Массовое добавление:</b> вставь до 100 ссылок — по одной на строку. WB обрабатывается в App Platform; Ozon — через постоянный облачный Chrome на отдельном VPS.</div>
   <div class="cards">
     <div class="metric"><div class="label">Требуют внимания</div><div class="value" id="mProblems">—</div><div class="note">вы дороже min. конкурента</div></div>
     <div class="metric"><div class="label">Цена конкурентна</div><div class="value" id="mOk">—</div><div class="note">вы не выше min. цены</div></div>

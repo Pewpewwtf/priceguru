@@ -1,0 +1,13 @@
+{
+  "name": "priceguru-ozon-vps-worker",
+  "version": "10.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node worker.js",
+    "test": "node test/parser.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

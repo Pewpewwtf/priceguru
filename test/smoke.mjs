@@ -18,4 +18,4 @@ const s=await getState();
 assert.equal(s.products.length,1);
 assert.equal(s.products[0].competitors.length,1);
 assert.equal(s.products[0].competitors[0].latest_price,900);
-console.log('PriceWatch v9.5.1 smoke test: OK');
+console.log('PriceGuru v10.0 smoke test: OK');

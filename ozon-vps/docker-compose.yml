@@ -1,0 +1,11 @@
+services:
+  ozon-browser:
+    build: .
+    container_name: priceguru-ozon-browser
+    restart: unless-stopped
+    shm_size: "1gb"
+    env_file: .env
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - ./data:/data

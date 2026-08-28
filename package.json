@@ -1,6 +1,6 @@
 {
   "name": "pricewatch-cloud",
-  "version": "9.5.2",
+  "version": "10.0",
   "private": true,
   "type": "module",
   "scripts": {

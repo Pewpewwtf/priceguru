@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { getSetting, setSetting } from './db.js';
 import { parseOzonComposer, ozonWidgetNames } from './ozon-parser.js';
 import { ozonProxyConfig } from './ozon-proxy.js';
+import { lookupOzonViaCloudBrowser } from './ozon-agent-cloud.js';
 
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
 let browserPromise=null;
@@ -340,24 +341,10 @@ async function ozonDomFallback(url,sku){
 async function lookupOzon(u){
   let sku=extractOzonSku(u), finalUrl=u.href;
   if(!sku){
-    try{const r=await fetch(u.href,{redirect:'follow',headers:{'user-agent':UA},signal:AbortSignal.timeout(15000)});finalUrl=r.url||u.href;sku=extractOzonSku(new URL(finalUrl));}catch{}
+    throw new Error('Не удалось определить артикул Ozon. Нужна полная ссылка на карточку.');
   }
-  if(!sku) throw new Error('Не удалось определить артикул Ozon. Нужна полная ссылка на карточку.');
-  const productPath=new URL(finalUrl).pathname.replace(/\/?$/,'/');
-  const proxyConfigured=Boolean(ozonProxyConfig());
-  const direct=proxyConfigured?{error:'skipped because Ozon proxy is configured'}:await ozonHttp(sku,productPath);
-  if(direct?.price) return {marketplace:'Ozon',sku:String(sku),name:direct.name||`Ozon ${sku}`,price:direct.price,source:direct.source,url:finalUrl};
-  let browserResult;
-  try{browserResult=await ozonBrowserComposer(productPath,sku);}catch(e){browserResult={error:e.message};}
-  if(browserResult?.price) return {marketplace:'Ozon',sku:String(sku),name:browserResult.name||`Ozon ${sku}`,price:browserResult.price,source:browserResult.source,url:finalUrl};
-  try{
-    const dom=await ozonDomFallback(finalUrl,sku);
-    return {marketplace:'Ozon',sku:String(sku),name:dom.name,price:dom.price,source:dom.source,url:finalUrl};
-  }catch(e){
-    const proxyConfigured=Boolean(process.env.OZON_PROXY_URL||process.env.OZON_PROXY_SERVER);
-    const proxyHint=proxyConfigured?' Residential proxy настроен, но Ozon всё равно блокирует запрос.':' Timeweb IP заблокирован Ozon. Добавьте российский residential HTTP proxy через OZON_PROXY_URL.';
-    throw new Error(`Ozon не отдал цену. Direct: ${direct?.error||'нет данных'}. Browser API: ${browserResult?.error||'нет данных'}. DOM: ${e.message}.${proxyHint}`);
-  }
+  const found=await lookupOzonViaCloudBrowser(finalUrl,sku);
+  return {marketplace:'Ozon',sku:String(sku),name:found.name||`Ozon ${sku}`,price:found.price,source:found.source||'Ozon cloud Chrome',url:finalUrl};
 }
 
 export async function closeCollectors(){
