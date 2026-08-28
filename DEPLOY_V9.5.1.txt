@@ -1,0 +1,7 @@
+PRICEWATCH v9.5.1 — IMPORTANT
+
+Upload the CONTENTS of this archive to the ROOT of your GitHub repository.
+At repository root you must see: Dockerfile, server.js, package.json, collectors.js, db.js.
+Do NOT create an extra PriceWatch_v9_5_1_flat/ folder in GitHub.
+
+After Timeweb deploy, /api/health MUST report version 9.5.1.
