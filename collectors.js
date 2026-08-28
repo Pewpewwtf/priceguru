@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSetting, setSetting } from './db.js';
+import { parseOzonComposer, ozonWidgetNames } from './ozon-parser.js';
 
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
 let browserPromise=null;
@@ -146,25 +147,11 @@ async function lookupWb(u){
 }
 
 function findOzonFromObject(root){
-  if(!root||typeof root!=='object') return null;
-  const q=[root]; let scanned=0;
-  while(q.length && scanned<10000){
-    const x=q.shift(); scanned++; if(!x||typeof x!=='object') continue;
-    let name=x.title||x.name||x.productTitle||null, price=null;
-    for(const k of ['finalPrice','cardPrice','priceWithSale','salePrice','price']){
-      if(x[k]!=null){
-        const kopecks=typeof x[k]==='number' && Number(x[k])>100000 && !String(x[k]).includes('.');
-        const n=normalizeMoney(x[k],{kopecks}); if(n&&n>=10){price=n;break;}
-      }
-    }
-    if(price && (name||x.id||x.sku||x.productId)) return {name:name?String(name):'',price};
-    for(const v of Object.values(x)){ if(v&&typeof v==='object') q.push(v); }
-  }
-  return null;
+  return parseOzonComposer(root,'');
 }
 
-async function ozonHttp(sku){
-  const path=encodeURIComponent(`/product/${sku}/`);
+async function ozonHttp(sku,productPath=`/product/${sku}/`){
+  const path=encodeURIComponent(productPath);
   const attempts=[
     [`https://api.ozon.ru/composer-api.bx/page/json/v2?url=${path}`,'api-composer'],
     [`https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2?url=${path}`,'www-entrypoint'],
@@ -175,8 +162,9 @@ async function ozonHttp(sku){
     try{
       const r=await fetch(url,{redirect:'manual',headers:{'user-agent':UA,'accept':'application/json,text/plain,*/*','accept-language':'ru-RU,ru;q=0.9','referer':'https://www.ozon.ru/','x-o3-app-name':'rich'},signal:AbortSignal.timeout(14000)});
       diag.push(`${label}:${r.status}`); if(!r.ok) continue;
-      const text=await r.text(); let j; try{j=JSON.parse(text);}catch{continue;}
-      const found=findOzonFromObject(j); if(found?.price) return {...found,source:`Ozon ${label}`};
+      const text=await r.text(); let j; try{j=JSON.parse(text);}catch{diag.push(`${label}:bad-json`);continue;}
+      const found=parseOzonComposer(j,sku); if(found?.price) return {...found,source:`Ozon ${label}`};
+      diag.push(`${label}:no-price`);
     }catch(e){diag.push(`${label}:${e.name||'error'}`);}
   }
   return {error:diag.join(', ')};
@@ -185,9 +173,7 @@ async function ozonHttp(sku){
 async function getBrowser(){
   if(browserPromise) return browserPromise;
   browserPromise=(async()=>{
-    const proxyServer=process.env.OZON_PROXY_SERVER;
-    const proxy=proxyServer?{server:proxyServer,username:process.env.OZON_PROXY_USERNAME||undefined,password:process.env.OZON_PROXY_PASSWORD||undefined}:undefined;
-    return chromium.launch({headless:true,proxy,args:['--no-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled']});
+    return chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled']});
   })();
   try{return await browserPromise;}catch(e){browserPromise=null;throw e;}
 }
@@ -199,18 +185,90 @@ function parsePriceText(text){
   return null;
 }
 
-async function ozonBrowser(url,sku){
-  const browser=await getBrowser(); const saved=await getSetting('ozon_storage_state');
-  const context=await browser.newContext({
-    locale:'ru-RU',timezoneId:'Europe/Moscow',viewport:{width:1440,height:1000},userAgent:UA,
-    extraHTTPHeaders:{'Accept-Language':'ru-RU,ru;q=0.9,en;q=0.7'},storageState:saved&&saved.cookies?saved:undefined
-  });
-  const page=await context.newPage();
+// Ozon needs a real browser-origin session. Direct server-side calls commonly get 307/403.
+let ozonBrowserInstance=null;
+let ozonContext=null;
+let ozonMainPage=null;
+let ozonInitPromise=null;
+let ozonSessionReady=false;
+const OZON_HOME='https://www.ozon.ru/';
+const OZON_CHALLENGE_WAIT_MS=Math.max(6000,Number(process.env.OZON_CHALLENGE_WAIT_MS||12000));
+
+async function closeOzonSession(){
+  ozonSessionReady=false;
+  ozonMainPage=null;
+  try{await ozonContext?.close();}catch{}
+  try{await ozonBrowserInstance?.close();}catch{}
+  ozonContext=null;ozonBrowserInstance=null;ozonInitPromise=null;
+}
+
+async function ensureOzonSession(){
+  if(ozonSessionReady&&ozonMainPage&&!ozonMainPage.isClosed()) return;
+  if(ozonInitPromise){await ozonInitPromise;return;}
+  ozonInitPromise=(async()=>{
+    const proxyServer=process.env.OZON_PROXY_SERVER;
+    const proxy=proxyServer?{server:proxyServer,username:process.env.OZON_PROXY_USERNAME||undefined,password:process.env.OZON_PROXY_PASSWORD||undefined}:undefined;
+    ozonBrowserInstance=await chromium.launch({headless:true,proxy,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-blink-features=AutomationControlled']});
+    const saved=await getSetting('ozon_storage_state').catch(()=>null);
+    ozonContext=await ozonBrowserInstance.newContext({
+      locale:'ru-RU',timezoneId:'Europe/Moscow',viewport:{width:1920,height:1080},userAgent:UA,
+      extraHTTPHeaders:{'Accept-Language':'ru-RU,ru;q=0.9,en;q=0.7'},storageState:saved&&saved.cookies?saved:undefined
+    });
+    // Do not block CSS/images/fonts: Ozon anti-bot uses page assets during its JS challenge.
+    ozonMainPage=await ozonContext.newPage();
+    await ozonMainPage.goto(OZON_HOME,{waitUntil:'domcontentloaded',timeout:90000});
+    await ozonMainPage.waitForTimeout(OZON_CHALLENGE_WAIT_MS);
+    const title=await ozonMainPage.title().catch(()=>'');
+    const body=(await ozonMainPage.locator('body').innerText({timeout:5000}).catch(()=>''))||'';
+    if(/antibot|доступ ограничен|access denied|captcha|не робот|слишком много запросов/i.test(`${title}\n${body.slice(0,3000)}`)){
+      throw new Error(`Ozon anti-bot challenge not passed${title?` (${title.slice(0,80)})`:''}`);
+    }
+    ozonSessionReady=true;
+    try{await setSetting('ozon_storage_state',await ozonContext.storageState());}catch{}
+  })();
+  try{await ozonInitPromise;}catch(e){await closeOzonSession();throw e;}finally{ozonInitPromise=null;}
+}
+
+async function ozonBrowserComposer(productPath,sku){
+  const endpoints=['/api/composer-api.bx/page/json/v2?url=','/api/entrypoint-api.bx/page/json/v2?url='];
+  const diag=[];
+  for(let sessionAttempt=0;sessionAttempt<2;sessionAttempt++){
+    await ensureOzonSession();
+    for(const endpoint of endpoints){
+      const apiUrl=endpoint+encodeURIComponent(productPath);
+      try{
+        const result=await ozonMainPage.evaluate(async url=>{
+          try{
+            const r=await fetch(url,{headers:{accept:'application/json'}});
+            return {status:r.status,text:await r.text(),url:r.url};
+          }catch(e){return {status:0,text:'',error:String(e?.message||e)};}
+        },apiUrl);
+        diag.push(`browser-${endpoint.includes('entrypoint')?'entrypoint':'composer'}:${result.status}`);
+        if([307,403].includes(result.status)) break;
+        if(result.status!==200){continue;}
+        let j;try{j=JSON.parse(result.text);}catch{diag.push('browser:bad-json');continue;}
+        const found=parseOzonComposer(j,sku);
+        if(found?.price){
+          try{await setSetting('ozon_storage_state',await ozonContext.storageState());}catch{}
+          return {...found,source:`Ozon browser composer (${found.sourceWidget||'widget'})`,diag};
+        }
+        const names=ozonWidgetNames(j);
+        diag.push(`widgets:${names.slice(0,12).join('|')||'none'}`);
+      }catch(e){diag.push(`browser-api:${e.name||'error'}`);}
+    }
+    if(sessionAttempt===0){await closeOzonSession();continue;}
+  }
+  return {error:diag.join(', ')};
+}
+
+async function ozonDomFallback(url,sku){
+  await ensureOzonSession();
+  const page=await ozonContext.newPage();
   try{
-    await page.goto(url,{waitUntil:'domcontentloaded',timeout:35000});
-    await page.waitForTimeout(1800);
+    await page.goto(url,{waitUntil:'domcontentloaded',timeout:50000});
+    await page.waitForTimeout(2500);
     const body=(await page.locator('body').innerText({timeout:8000}).catch(()=>''))||'';
-    if(/проверяем|не робот|captcha|доступ ограничен|слишком много запросов|access denied/i.test(body)) throw new Error('Ozon показал антибот-проверку в облачном браузере');
+    if(/проверяем|не робот|captcha|доступ ограничен|слишком много запросов|access denied/i.test(body)) throw new Error('Ozon показал антибот-проверку');
     let name='';
     for(const sel of ['[data-widget="webProductHeading"] h1','[data-widget="webProductHeading"]','h1']){
       name=(await page.locator(sel).first().innerText({timeout:1500}).catch(()=>''))?.trim(); if(name) break;
@@ -223,15 +281,14 @@ async function ozonBrowser(url,sku){
     if(!price){
       const ld=await page.locator('script[type="application/ld+json"]').allTextContents().catch(()=>[]);
       for(const text of ld){
-        try{const x=JSON.parse(text); const arr=Array.isArray(x)?x:[x]; for(const n of arr){const offer=Array.isArray(n?.offers)?n.offers[0]:n?.offers; const pr=normalizeMoney(offer?.price||offer?.lowPrice); if(pr){price=pr;if(!name&&n?.name)name=n.name;break;}}}catch{}
+        try{const x=JSON.parse(text);const arr=Array.isArray(x)?x:[x];for(const n of arr){const offer=Array.isArray(n?.offers)?n.offers[0]:n?.offers;const pr=normalizeMoney(offer?.price||offer?.lowPrice);if(pr){price=pr;if(!name&&n?.name)name=n.name;break;}}}catch{}
         if(price)break;
       }
     }
     if(!price) price=parsePriceText(body);
-    if(!price) throw new Error('Ozon открыл карточку, но цена не найдена');
-    try{await setSetting('ozon_storage_state',await context.storageState());}catch{}
-    return {name:name||`Ozon ${sku}`,price,source:'Ozon cloud browser'};
-  } finally { await context.close().catch(()=>{}); }
+    if(!price) throw new Error('карточка открылась, но цена не найдена в DOM');
+    return {name:name||`Ozon ${sku}`,price,source:'Ozon DOM fallback'};
+  }finally{await page.close().catch(()=>{});}
 }
 
 async function lookupOzon(u){
@@ -240,19 +297,26 @@ async function lookupOzon(u){
     try{const r=await fetch(u.href,{redirect:'follow',headers:{'user-agent':UA},signal:AbortSignal.timeout(15000)});finalUrl=r.url||u.href;sku=extractOzonSku(new URL(finalUrl));}catch{}
   }
   if(!sku) throw new Error('Не удалось определить артикул Ozon. Нужна полная ссылка на карточку.');
-  const direct=await ozonHttp(sku);
+  const productPath=new URL(finalUrl).pathname.replace(/\/?$/,'/');
+  const direct=await ozonHttp(sku,productPath);
   if(direct?.price) return {marketplace:'Ozon',sku:String(sku),name:direct.name||`Ozon ${sku}`,price:direct.price,source:direct.source,url:finalUrl};
+  let browserResult;
+  try{browserResult=await ozonBrowserComposer(productPath,sku);}catch(e){browserResult={error:e.message};}
+  if(browserResult?.price) return {marketplace:'Ozon',sku:String(sku),name:browserResult.name||`Ozon ${sku}`,price:browserResult.price,source:browserResult.source,url:finalUrl};
   try{
-    const b=await ozonBrowser(finalUrl,sku);
-    return {marketplace:'Ozon',sku:String(sku),name:b.name,price:b.price,source:b.source,url:finalUrl};
+    const dom=await ozonDomFallback(finalUrl,sku);
+    return {marketplace:'Ozon',sku:String(sku),name:dom.name,price:dom.price,source:dom.source,url:finalUrl};
   }catch(e){
-    throw new Error(`Ozon не отдал цену автоматически. HTTP: ${direct?.error||'нет данных'}. Browser: ${e.message}. Если это повторяется на Timeweb, понадобится прокси для Ozon.`);
+    const proxyHint=process.env.OZON_PROXY_SERVER?' Proxy уже настроен и тоже не помог.':'';
+    throw new Error(`Ozon не отдал цену. Direct: ${direct?.error||'нет данных'}. Browser API: ${browserResult?.error||'нет данных'}. DOM: ${e.message}.${proxyHint}`);
   }
 }
 
 export async function closeCollectors(){
+  await closeOzonSession().catch(()=>{});
   if(browserPromise){try{const b=await browserPromise;await b.close();}catch{}browserPromise=null;}
 }
+
 
 // Pure helpers exposed for smoke tests; not used by the UI.
 export const __test = { normalizeMoney, parsePriceText, extractWbSku, extractOzonSku, findOzonFromObject, parseWbPayload, decodeWbResult };
