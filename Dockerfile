@@ -8,4 +8,6 @@ COPY package*.json ./
 RUN npm install --omit=dev
 COPY . .
 EXPOSE 8080
-CMD ["xvfb-run", "-a", "npm", "start"]
+# Start the web server independently from Xvfb. Xvfb is only needed by the headed Ozon browser.
+# If Xvfb has a problem, /api/health still stays online and Timeweb does not roll back the deploy.
+CMD ["bash", "-lc", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac >/tmp/xvfb.log 2>&1 & export DISPLAY=:99; exec npm start"]

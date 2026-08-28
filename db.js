@@ -124,7 +124,7 @@ export async function getState() {
       latest_price: num(p.latest_price),
       competitors: mem.competitors.filter(c => c.product_id === p.id).map(c => ({...c, latest_price:num(c.latest_price), history: c.history || []}))
     }));
-    return { version: '9.5.1', products, events: mem.events.slice(0,100) };
+    return { version: '9.5.2', products, events: mem.events.slice(0,100) };
   }
   const db = await requirePool();
   const [pRes, cRes, hRes, eRes] = await Promise.all([
@@ -147,7 +147,7 @@ export async function getState() {
     byProduct.get(String(c.product_id)).push({...c, id:Number(c.id), product_id:Number(c.product_id), latest_price:num(c.latest_price), history:histories.get(`competitor:${c.id}`)||[]});
   }
   return {
-    version: '9.5.1',
+    version: '9.5.2',
     products: pRes.rows.map(p => ({...p, id:Number(p.id), latest_price:num(p.latest_price), history:histories.get(`product:${p.id}`)||[], competitors:byProduct.get(String(p.id))||[]})),
     events: eRes.rows
   };

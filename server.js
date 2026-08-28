@@ -31,14 +31,14 @@ app.use(authMiddleware);
 
 app.get('/login',(req,res)=>{
   if(!AUTH_ENABLED||authed(req))return res.redirect('/');
-  res.type('html').send(`<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PriceWatch — вход</title><style>body{font-family:system-ui;background:#f6f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.box{background:#fff;border:1px solid #e8eaf0;border-radius:18px;padding:28px;width:min(380px,90vw)}h1{margin:0 0 6px;font-size:22px}.small{color:#7b8190;font-size:13px;margin-bottom:20px}input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #dfe2e8;border-radius:11px;font:inherit}button{width:100%;margin-top:12px;padding:13px;border:0;border-radius:11px;background:#181b24;color:#fff;font-weight:700;cursor:pointer}.err{color:#d73b3e;margin-top:10px;font-size:13px}</style><div class="box"><h1>₽ PriceWatch</h1><div class="small">Облачная версия v9.5.1</div><form method="post" action="/login"><input type="password" name="password" autofocus placeholder="Пароль"><button>Войти</button>${req.query.bad?'<div class="err">Неверный пароль</div>':''}</form></div></html>`);
+  res.type('html').send(`<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PriceWatch — вход</title><style>body{font-family:system-ui;background:#f6f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.box{background:#fff;border:1px solid #e8eaf0;border-radius:18px;padding:28px;width:min(380px,90vw)}h1{margin:0 0 6px;font-size:22px}.small{color:#7b8190;font-size:13px;margin-bottom:20px}input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #dfe2e8;border-radius:11px;font:inherit}button{width:100%;margin-top:12px;padding:13px;border:0;border-radius:11px;background:#181b24;color:#fff;font-weight:700;cursor:pointer}.err{color:#d73b3e;margin-top:10px;font-size:13px}</style><div class="box"><h1>₽ PriceWatch</h1><div class="small">Облачная версия v9.5.2</div><form method="post" action="/login"><input type="password" name="password" autofocus placeholder="Пароль"><button>Войти</button>${req.query.bad?'<div class="err">Неверный пароль</div>':''}</form></div></html>`);
 });
 app.post('/login',(req,res)=>{if(!AUTH_ENABLED||!APP_PASSWORD||timingSafeEqual(req.body.password||'',APP_PASSWORD)){res.cookie('pw_auth',authToken(),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:30*24*3600*1000});return res.redirect('/');}res.redirect('/login?bad=1');});
 app.get('/logout',(req,res)=>{res.clearCookie('pw_auth');res.redirect('/login');});
 
-app.get('/api/health',(req,res)=>{const db=databaseHealth();res.json({ok:true,version:'9.5.1',database:usingPostgres()?'postgres':(db.configured?db.status:'memory'),dbError:db.error||null,auth:AUTH_ENABLED&&!!APP_PASSWORD,ozonProxy:Boolean(process.env.OZON_PROXY_URL||process.env.OZON_PROXY_SERVER),time:new Date().toISOString()});});
+app.get('/api/health',(req,res)=>{const db=databaseHealth();res.json({ok:true,version:'9.5.2',database:usingPostgres()?'postgres':(db.configured?db.status:'memory'),dbError:db.error||null,auth:AUTH_ENABLED&&!!APP_PASSWORD,ozonProxy:Boolean(process.env.OZON_PROXY_URL||process.env.OZON_PROXY_SERVER),time:new Date().toISOString()});});
 app.get('/api/state',async(req,res,next)=>{try{res.json({ok:true,...await getState()});}catch(e){next(e);}});
-app.get('/api/export',async(req,res,next)=>{try{const state=await getState();res.setHeader('content-disposition','attachment; filename="pricewatch-v9.5.1-backup.json"');res.json(state);}catch(e){next(e);}});
+app.get('/api/export',async(req,res,next)=>{try{const state=await getState();res.setHeader('content-disposition','attachment; filename="pricewatch-v9.5.2-backup.json"');res.json(state);}catch(e){next(e);}});
 app.post('/api/import',async(req,res,next)=>{try{await resetAndImport(req.body);await addEvent('Импортирован backup PriceWatch');res.json({ok:true});}catch(e){next(e);}});
 app.delete('/api/products/:id',async(req,res,next)=>{try{await deleteProduct(req.params.id);res.json({ok:true});}catch(e){next(e);}});
 app.delete('/api/competitors/:id',async(req,res,next)=>{try{await deleteCompetitor(req.params.id);res.json({ok:true});}catch(e){next(e);}});
@@ -90,7 +90,7 @@ app.post('/api/refresh',(req,res)=>{const job=createJob('refresh',0);setImmediat
 app.use(express.static(path.join(__dirname,'public'),{extensions:['html']}));
 app.use((err,req,res,next)=>{console.error(err);const status=err?.code==='DB_UNAVAILABLE'?503:(/до 100|хотя бы|Некоррект|поддерживаются/i.test(err.message)?400:500);res.status(status).json({ok:false,error:err.message||'Ошибка сервера'});});
 
-app.listen(PORT,'0.0.0.0',()=>console.log(`PriceWatch v9.5.1 listening on :${PORT}`));
+app.listen(PORT,'0.0.0.0',()=>console.log(`PriceWatch v9.5.2 listening on :${PORT}`));
 
 initDb().then(()=>{
   console.log(`Database ready: ${usingPostgres()?'PostgreSQL':'memory'}`);
