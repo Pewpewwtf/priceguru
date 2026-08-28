@@ -3,6 +3,8 @@ const { Pool } = pg;
 
 const hasPg = !!process.env.DATABASE_URL;
 let pool = null;
+let dbStatus = hasPg ? 'connecting' : 'memory';
+let dbError = null;
 let mem = { nextId: 1, products: [], competitors: [], events: [], settings: new Map() };
 
 function sslConfig() {
@@ -12,9 +14,11 @@ function sslConfig() {
 }
 
 export async function initDb() {
-  if (!hasPg) return;
-  pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: sslConfig() });
-  await pool.query(`
+  if (!hasPg) { dbStatus = 'memory'; return; }
+  dbStatus = 'connecting'; dbError = null;
+  pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: sslConfig(), connectionTimeoutMillis: 10000 });
+  try {
+    await pool.query(`
     CREATE TABLE IF NOT EXISTS products (
       id BIGSERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -59,7 +63,17 @@ export async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+    dbStatus = 'postgres';
+  } catch (e) {
+    dbStatus = 'error';
+    dbError = e?.message || String(e);
+    try { await pool?.end(); } catch {}
+    pool = null;
+    throw e;
+  }
 }
+
+export function databaseHealth(){ return { configured:hasPg, status:dbStatus, error:dbError }; }
 
 function num(v) { return v == null ? null : Number(v); }
 
@@ -180,4 +194,4 @@ export async function resetAndImport(state){
 }
 function normalizeImported(x){return {name:x.name||'Imported product',marketplace:x.marketplace||'WB',sku:x.sku||'',url:x.url||'',latest_price:num(x.latest_price ?? x.price),source_status:x.source_status||'import v8',updated_at:x.updated_at||new Date().toISOString()};}
 
-export function usingPostgres(){return hasPg;}
+export function usingPostgres(){return hasPg && dbStatus==='postgres' && !!pool;}
