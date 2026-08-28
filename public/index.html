@@ -8,7 +8,7 @@
 <body>
 <div class="wrap">
   <div class="top">
-    <div><div class="brand"><div class="logo">₽</div>PriceWatch <span class="v">v9 cloud</span></div><div class="small" style="margin-top:5px">WB + Ozon · PostgreSQL · <span class="online">● облако</span></div></div>
+    <div><div class="brand"><div class="logo">₽</div>PriceWatch <span class="v">v9.3 cloud</span></div><div class="small" style="margin-top:5px">WB + Ozon · PostgreSQL · <span class="online">● облако</span></div></div>
     <div class="actions"><button class="btn" onclick="openBulkProducts()">+ Товары списком</button><button class="btn" onclick="openImport()">Импорт v8</button><button class="btn" onclick="exportData()">Экспорт</button><button class="btn primary" id="refreshBtn" onclick="refreshAll()">↻ Обновить цены</button></div>
   </div>
   <div class="info"><b>Массовое добавление:</b> вставь до 100 ссылок — по одной на строку. Название, маркетплейс, артикул и цена подтянутся автоматически.</div>
@@ -20,7 +20,7 @@
   </div>
   <div class="layout">
     <div class="panel"><div class="panelhead"><h2>Товары</h2><div class="small">сервер обновляет цены раз в 60 мин</div></div><div id="products"><div class="empty">Загрузка…</div></div></div>
-    <div class="panel"><div class="panelhead"><h2>Изменения цен</h2><a class="linkbtn" href="/logout">выйти</a></div><div class="events" id="events"></div></div>
+    <div class="panel"><div class="panelhead"><h2>Изменения цен</h2></div><div class="events" id="events"></div></div>
   </div>
 </div>
 <div class="modalback" id="modal"><div class="modal" id="modalBody"></div></div>
