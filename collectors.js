@@ -3,10 +3,27 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSetting, setSetting } from './db.js';
 import { parseOzonComposer, ozonWidgetNames } from './ozon-parser.js';
+import { ozonProxyConfig } from './ozon-proxy.js';
 
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
 let browserPromise=null;
 const execFileAsync=promisify(execFile);
+
+let ozonQueue=Promise.resolve();
+let ozonLastStartedAt=0;
+const OZON_MIN_INTERVAL_MS=Math.max(0,Number(process.env.OZON_MIN_INTERVAL_MS||8000));
+
+function queueOzon(task){
+  const run=async()=>{
+    const wait=Math.max(0,OZON_MIN_INTERVAL_MS-(Date.now()-ozonLastStartedAt));
+    if(wait) await new Promise(resolve=>setTimeout(resolve,wait));
+    ozonLastStartedAt=Date.now();
+    return task();
+  };
+  const result=ozonQueue.then(run,run);
+  ozonQueue=result.catch(()=>{});
+  return result;
+}
 
 function cleanUrl(raw){
   let u; try{u=new URL(String(raw).trim());}catch{throw new Error('Некорректная ссылка');}
@@ -37,7 +54,7 @@ function normalizeMoney(v,{kopecks=false}={}){
 export async function lookupProduct(rawUrl){
   const u=cleanUrl(rawUrl); const host=u.hostname.toLowerCase();
   if(host==='wildberries.ru'||host.endsWith('.wildberries.ru')) return lookupWb(u);
-  if(host==='ozon.ru'||host.endsWith('.ozon.ru')) return lookupOzon(u);
+  if(host==='ozon.ru'||host.endsWith('.ozon.ru')) return queueOzon(()=>lookupOzon(u));
   throw new Error('Поддерживаются только Wildberries и Ozon');
 }
 
@@ -194,6 +211,31 @@ let ozonSessionReady=false;
 const OZON_HOME='https://www.ozon.ru/';
 const OZON_CHALLENGE_WAIT_MS=Math.max(6000,Number(process.env.OZON_CHALLENGE_WAIT_MS||12000));
 
+async function applyOzonStealth(context){
+  await context.addInitScript(()=>{
+    try{Object.defineProperty(navigator,'webdriver',{get:()=>undefined,configurable:true});}catch{}
+    try{Object.defineProperty(navigator,'languages',{get:()=>['ru-RU','ru','en-US','en'],configurable:true});}catch{}
+    try{Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5],configurable:true});}catch{}
+    try{window.chrome=window.chrome||{runtime:{}};}catch{}
+    try{
+      const original=navigator.permissions?.query?.bind(navigator.permissions);
+      if(original) navigator.permissions.query=(p)=>p&&p.name==='notifications'?Promise.resolve({state:Notification.permission}):original(p);
+    }catch{}
+    try{
+      const patch=(Proto)=>{
+        if(!Proto?.prototype?.getParameter)return;
+        const original=Proto.prototype.getParameter;
+        Proto.prototype.getParameter=function(parameter){
+          if(parameter===37445)return 'Intel Inc.';
+          if(parameter===37446)return 'Intel Iris OpenGL Engine';
+          return original.call(this,parameter);
+        };
+      };
+      patch(window.WebGLRenderingContext);patch(window.WebGL2RenderingContext);
+    }catch{}
+  });
+}
+
 async function closeOzonSession(){
   ozonSessionReady=false;
   ozonMainPage=null;
@@ -206,14 +248,18 @@ async function ensureOzonSession(){
   if(ozonSessionReady&&ozonMainPage&&!ozonMainPage.isClosed()) return;
   if(ozonInitPromise){await ozonInitPromise;return;}
   ozonInitPromise=(async()=>{
-    const proxyServer=process.env.OZON_PROXY_SERVER;
-    const proxy=proxyServer?{server:proxyServer,username:process.env.OZON_PROXY_USERNAME||undefined,password:process.env.OZON_PROXY_PASSWORD||undefined}:undefined;
-    ozonBrowserInstance=await chromium.launch({headless:true,proxy,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-blink-features=AutomationControlled']});
+    const proxy=ozonProxyConfig();
+    const headless=String(process.env.OZON_HEADLESS||'false').toLowerCase()==='true';
+    ozonBrowserInstance=await chromium.launch({
+      headless,proxy,
+      args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled','--window-size=1920,1080']
+    });
     const saved=await getSetting('ozon_storage_state').catch(()=>null);
     ozonContext=await ozonBrowserInstance.newContext({
-      locale:'ru-RU',timezoneId:'Europe/Moscow',viewport:{width:1920,height:1080},userAgent:UA,
+      locale:'ru-RU',timezoneId:'Europe/Moscow',viewport:{width:1920,height:1080},
       extraHTTPHeaders:{'Accept-Language':'ru-RU,ru;q=0.9,en;q=0.7'},storageState:saved&&saved.cookies?saved:undefined
     });
+    await applyOzonStealth(ozonContext);
     // Do not block CSS/images/fonts: Ozon anti-bot uses page assets during its JS challenge.
     ozonMainPage=await ozonContext.newPage();
     await ozonMainPage.goto(OZON_HOME,{waitUntil:'domcontentloaded',timeout:90000});
@@ -298,7 +344,8 @@ async function lookupOzon(u){
   }
   if(!sku) throw new Error('Не удалось определить артикул Ozon. Нужна полная ссылка на карточку.');
   const productPath=new URL(finalUrl).pathname.replace(/\/?$/,'/');
-  const direct=await ozonHttp(sku,productPath);
+  const proxyConfigured=Boolean(ozonProxyConfig());
+  const direct=proxyConfigured?{error:'skipped because Ozon proxy is configured'}:await ozonHttp(sku,productPath);
   if(direct?.price) return {marketplace:'Ozon',sku:String(sku),name:direct.name||`Ozon ${sku}`,price:direct.price,source:direct.source,url:finalUrl};
   let browserResult;
   try{browserResult=await ozonBrowserComposer(productPath,sku);}catch(e){browserResult={error:e.message};}
@@ -307,7 +354,8 @@ async function lookupOzon(u){
     const dom=await ozonDomFallback(finalUrl,sku);
     return {marketplace:'Ozon',sku:String(sku),name:dom.name,price:dom.price,source:dom.source,url:finalUrl};
   }catch(e){
-    const proxyHint=process.env.OZON_PROXY_SERVER?' Proxy уже настроен и тоже не помог.':'';
+    const proxyConfigured=Boolean(process.env.OZON_PROXY_URL||process.env.OZON_PROXY_SERVER);
+    const proxyHint=proxyConfigured?' Residential proxy настроен, но Ozon всё равно блокирует запрос.':' Timeweb IP заблокирован Ozon. Добавьте российский residential HTTP proxy через OZON_PROXY_URL.';
     throw new Error(`Ozon не отдал цену. Direct: ${direct?.error||'нет данных'}. Browser API: ${browserResult?.error||'нет данных'}. DOM: ${e.message}.${proxyHint}`);
   }
 }

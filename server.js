@@ -36,7 +36,7 @@ app.get('/login',(req,res)=>{
 app.post('/login',(req,res)=>{if(!AUTH_ENABLED||!APP_PASSWORD||timingSafeEqual(req.body.password||'',APP_PASSWORD)){res.cookie('pw_auth',authToken(),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:30*24*3600*1000});return res.redirect('/');}res.redirect('/login?bad=1');});
 app.get('/logout',(req,res)=>{res.clearCookie('pw_auth');res.redirect('/login');});
 
-app.get('/api/health',(req,res)=>{const db=databaseHealth();res.json({ok:true,version:'9.4',database:usingPostgres()?'postgres':(db.configured?db.status:'memory'),dbError:db.error||null,auth:AUTH_ENABLED&&!!APP_PASSWORD,time:new Date().toISOString()});});
+app.get('/api/health',(req,res)=>{const db=databaseHealth();res.json({ok:true,version:'9.5',database:usingPostgres()?'postgres':(db.configured?db.status:'memory'),dbError:db.error||null,auth:AUTH_ENABLED&&!!APP_PASSWORD,ozonProxy:Boolean(process.env.OZON_PROXY_URL||process.env.OZON_PROXY_SERVER),time:new Date().toISOString()});});
 app.get('/api/state',async(req,res,next)=>{try{res.json({ok:true,...await getState()});}catch(e){next(e);}});
 app.get('/api/export',async(req,res,next)=>{try{const state=await getState();res.setHeader('content-disposition','attachment; filename="pricewatch-v9.4-backup.json"');res.json(state);}catch(e){next(e);}});
 app.post('/api/import',async(req,res,next)=>{try{await resetAndImport(req.body);await addEvent('Импортирован backup PriceWatch');res.json({ok:true});}catch(e){next(e);}});
