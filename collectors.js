@@ -1,8 +1,11 @@
 import { chromium } from 'playwright';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { getSetting, setSetting } from './db.js';
 
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
 let browserPromise=null;
+const execFileAsync=promisify(execFile);
 
 function cleanUrl(raw){
   let u; try{u=new URL(String(raw).trim());}catch{throw new Error('Некорректная ссылка');}
@@ -37,23 +40,109 @@ export async function lookupProduct(rawUrl){
   throw new Error('Поддерживаются только Wildberries и Ozon');
 }
 
-async function lookupWb(u){
-  const sku=extractWbSku(u); if(!sku) throw new Error('Не удалось определить артикул Wildberries');
-  const endpoint=`https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&lang=ru&nm=${encodeURIComponent(sku)}`;
-  const r=await fetch(endpoint,{headers:{'user-agent':UA,'accept-language':'ru-RU,ru;q=0.9,en;q=0.7'},signal:AbortSignal.timeout(15000)});
-  if(!r.ok) throw new Error(`Wildberries вернул HTTP ${r.status}`);
-  const j=await r.json(); const p=j?.data?.products?.[0]||j?.products?.[0]; if(!p) throw new Error('Wildberries не вернул данные по товару');
-  const name=(p.name||p.title||p.brand||`WB ${sku}`).trim(); const prices=[];
+function wbEndpoints(sku){
+  const q=`appType=1&curr=rub&dest=-1257786&lang=ru&spp=30&nm=${encodeURIComponent(sku)}`;
+  return [
+    [`https://card.wb.ru/cards/v4/detail?${q}`,'card'],
+    [`https://search.wb.ru/cards/v4/detail?${q}`,'search']
+  ];
+}
+
+function parseWbPayload(j,sku){
+  const p=j?.data?.products?.[0]||j?.products?.[0];
+  if(!p) return null;
+  const name=String(p.name||p.title||p.brand||`WB ${sku}`).trim();
+  const prices=[];
   for(const size of (p.sizes||[])){
     if(size?.price?.product>0) prices.push((Number(size.price.product)+Number(size.price.logistics||0))/100);
     if(size?.price?.basic>0) prices.push(Number(size.price.basic)/100);
     if(size?.salePriceU>0) prices.push(Number(size.salePriceU)/100);
     if(size?.priceU>0) prices.push(Number(size.priceU)/100);
   }
-  if(p.salePriceU>0) prices.push(Number(p.salePriceU)/100); if(p.priceU>0) prices.push(Number(p.priceU)/100);
-  if(p.salePrice>0) prices.push(Number(p.salePrice)); if(p.price>0) prices.push(Number(p.price));
-  const price=Math.min(...prices.filter(x=>Number.isFinite(x)&&x>0)); if(!Number.isFinite(price)) throw new Error('Wildberries не вернул текущую цену');
-  return {marketplace:'WB',sku:String(sku),name,price:Math.round(price*100)/100,source:'WB card API',url:u.href};
+  if(p.salePriceU>0) prices.push(Number(p.salePriceU)/100);
+  if(p.priceU>0) prices.push(Number(p.priceU)/100);
+  if(p.salePrice>0) prices.push(Number(p.salePrice));
+  if(p.price>0) prices.push(Number(p.price));
+  const price=Math.min(...prices.filter(x=>Number.isFinite(x)&&x>0));
+  if(!Number.isFinite(price)) return {name,price:null};
+  return {name,price:Math.round(price*100)/100};
+}
+
+async function wbViaFetch(url){
+  const r=await fetch(url,{headers:{
+    'user-agent':UA,
+    'accept':'application/json,text/plain,*/*',
+    'accept-language':'ru-RU,ru;q=0.9,en;q=0.7',
+    'referer':'https://www.wildberries.ru/',
+    'origin':'https://www.wildberries.ru'
+  },signal:AbortSignal.timeout(15000)});
+  const text=await r.text();
+  return {status:r.status,text};
+}
+
+async function wbViaCurl(url){
+  const args=[
+    '-4','-sS','--compressed','--max-time','18','--connect-timeout','8','-L',
+    '-A',UA,
+    '-H','Accept: application/json,text/plain,*/*',
+    '-H','Accept-Language: ru-RU,ru;q=0.9,en;q=0.7',
+    '-H','Referer: https://www.wildberries.ru/',
+    '-H','Origin: https://www.wildberries.ru',
+    '-w','\n__PW_HTTP__:%{http_code}',url
+  ];
+  if(process.env.WB_PROXY_URL) args.unshift('--proxy',process.env.WB_PROXY_URL);
+  const {stdout}=await execFileAsync('curl',args,{timeout:22000,maxBuffer:5*1024*1024});
+  const marker='\n__PW_HTTP__:';
+  const i=stdout.lastIndexOf(marker);
+  if(i<0) return {status:0,text:stdout};
+  return {status:Number(stdout.slice(i+marker.length).trim())||0,text:stdout.slice(0,i)};
+}
+
+async function wbViaBrowser(url){
+  const browser=await getBrowser();
+  const context=await browser.newContext({locale:'ru-RU',timezoneId:'Europe/Moscow',userAgent:UA,extraHTTPHeaders:{'Accept-Language':'ru-RU,ru;q=0.9,en;q=0.7'}});
+  const page=await context.newPage();
+  try{
+    const r=await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});
+    const status=r?.status()||0;
+    const text=(await page.locator('body').innerText({timeout:5000}).catch(()=>''))||'';
+    return {status,text};
+  } finally {await context.close().catch(()=>{});}
+}
+
+function decodeWbResult(result,sku){
+  if(!result||result.status!==200||!result.text) return null;
+  try{return parseWbPayload(JSON.parse(result.text),sku);}catch{return null;}
+}
+
+async function lookupWb(u){
+  const sku=extractWbSku(u); if(!sku) throw new Error('Не удалось определить артикул Wildberries');
+  const diag=[];
+  for(const [url,label] of wbEndpoints(sku)){
+    for(let attempt=1;attempt<=2;attempt++){
+      try{
+        const r=await wbViaCurl(url); const parsed=decodeWbResult(r,sku);
+        diag.push(`curl-${label}:${r.status}${parsed?.price?'':':no-data'}`);
+        if(parsed?.price) return {marketplace:'WB',sku:String(sku),name:parsed.name,price:parsed.price,source:`WB curl ${label}`,url:u.href};
+        if(![403,429].includes(r.status)) break;
+      }catch(e){diag.push(`curl-${label}:${e.code||e.name||'error'}`);break;}
+      await new Promise(resolve=>setTimeout(resolve,500+Math.floor(Math.random()*900)));
+    }
+  }
+  for(const [url,label] of wbEndpoints(sku)){
+    try{
+      const r=await wbViaFetch(url); const parsed=decodeWbResult(r,sku);
+      diag.push(`fetch-${label}:${r.status}${parsed?.price?'':':no-data'}`);
+      if(parsed?.price) return {marketplace:'WB',sku:String(sku),name:parsed.name,price:parsed.price,source:`WB fetch ${label}`,url:u.href};
+    }catch(e){diag.push(`fetch-${label}:${e.name||'error'}`);}
+  }
+  try{
+    const [url]=wbEndpoints(sku)[0]; const r=await wbViaBrowser(url); const parsed=decodeWbResult(r,sku);
+    diag.push(`browser:${r.status}${parsed?.price?'':':no-data'}`);
+    if(parsed?.price) return {marketplace:'WB',sku:String(sku),name:parsed.name,price:parsed.price,source:'WB Chromium fallback',url:u.href};
+  }catch(e){diag.push(`browser:${e.name||'error'}`);}
+  const proxyHint=process.env.WB_PROXY_URL?' WB proxy также не помог.':'';
+  throw new Error(`Wildberries не отдал цену автоматически. Попытки: ${diag.join(', ')}.${proxyHint} Если везде 403, Timeweb IP блокируется WB и понадобится российский proxy.`);
 }
 
 function findOzonFromObject(root){
@@ -166,4 +255,4 @@ export async function closeCollectors(){
 }
 
 // Pure helpers exposed for smoke tests; not used by the UI.
-export const __test = { normalizeMoney, parsePriceText, extractWbSku, extractOzonSku, findOzonFromObject };
+export const __test = { normalizeMoney, parsePriceText, extractWbSku, extractOzonSku, findOzonFromObject, parseWbPayload, decodeWbResult };

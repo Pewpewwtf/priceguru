@@ -1,4 +1,4 @@
-# PriceWatch v9 Cloud
+# PriceWatch v9.1 Cloud
 
 Облачная версия PriceWatch для мониторинга цен Wildberries и Ozon.
 
@@ -13,7 +13,7 @@
 - экспорт cloud-backup;
 - пароль на веб-интерфейс;
 - Dockerfile для Timeweb App Platform / GitHub deploy;
-- WB: публичный card API;
+- WB: curl-first public card API с retry + fetch/Chromium fallback;
 - Ozon: сначала JSON endpoints, затем headless Chromium (Playwright); состояние Ozon cookies сохраняется в PostgreSQL;
 - опциональный HTTP proxy для Ozon через ENV.
 
@@ -73,3 +73,14 @@ Ozon активно использует антибот-защиту. v9 исп�
 Если Timeweb IP будет стабильно получать антибот-проверку, задайте proxy через `OZON_PROXY_*`. Это не влияет на WB.
 
 Подробный деплой: `TIMEWEB_DEPLOY.md`.
+
+
+## Обновление v9 → v9.1
+
+1. Замените файлы в GitHub содержимым архива v9.1.
+2. Commit + push.
+3. ENV и PostgreSQL не меняйте.
+4. После деплоя `/api/health` должен показать `version: "9.1"`.
+5. Повторите добавление WB-ссылки.
+
+Если ошибка после v9.1 показывает `curl-card:403`, `curl-search:403`, `fetch-*:403` и `browser:403`, тогда блокируется уже сам внешний IP Timeweb. Только в этом случае добавляется `WB_PROXY_URL`.
